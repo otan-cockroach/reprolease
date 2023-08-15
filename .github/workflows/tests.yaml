@@ -1,0 +1,93 @@
+name: Tests
+permissions: read-all
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  pull_request:
+  workflow_dispatch: # Allow manual runs to kick off benchmarks
+    inputs:
+      run_bench:
+        description: Run benchmarks
+        required: false
+        type: boolean
+
+env:
+  GO_VERSION: "1.20"
+
+jobs:
+  # golangci-lint needs to be run on its own without any mods setup.
+  golangci-lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v3
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - uses: actions/checkout@v3
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v3
+        with:
+          args: --timeout=5m
+
+  run-tests:
+    name: Run tests
+    runs-on: ubuntu-latest
+    env:
+      COVER_OUT: coverage.out
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Go
+        uses: actions/setup-go@v3
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Determine paths to cache
+        id: cache
+        run: |
+          echo "go-build=$(go env GOCACHE)" >> $GITHUB_OUTPUT
+          echo "go-mod=$(go env GOMODCACHE)">> $GITHUB_OUTPUT
+
+      - name: Go Build Cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ${{ steps.cache.outputs.go-build }}
+            ${{ steps.cache.outputs.go-mod }}
+          key: ${{ runner.os }}-integration-${{ hashFiles('**/go.sum') }}
+
+      - name: Start CockroachDB
+        working-directory: .github
+        run: docker-compose up -d cockroachdb
+
+      - name: Go Tests
+        run: |
+          echo "current commit SHA: ${{ github.event.pull_request.head.sha }}"
+          go test -v -race -coverpkg=./... -covermode=atomic -coverprofile=${{ env.COVER_OUT }} ./... 2>&1 | tee test_output.txt
+          go run github.com/jstemmer/go-junit-report -set-exit-code < test_output.txt > report.xml
+
+      - name: Test Summary
+        uses: test-summary/action@v2
+        with:
+          paths: |
+            report.xml
+          output: test-summary.md
+        if: always()
+
+      - name: Writing markdown summary
+        run: |
+          cat test-summary.md >> $GITHUB_STEP_SUMMARY
+        if: always()
+
+      - name: Upload test artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: test-artifacts
+          path: |
+            test-summary.md
+            test_output.txt
+            report.xml
+        if: always()
